@@ -3,9 +3,12 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "export": "next export"
+
   },
   "dependencies": {
+    "@100mslive/react-sdk": "^0.10.34",
     "@auth0/auth0-react": "^1.10.1",
     "@emotion/react": "^11.8.1",
     "@emotion/styled": "^11.8.1",
