@@ -9,8 +9,9 @@ import DialogActions from '@mui/material/DialogActions'
 import DialogContent from '@mui/material/DialogContent'
 import DialogContentText from '@mui/material/DialogContentText'
 import DialogTitle from '@mui/material/DialogTitle'
+import { useRouter } from 'next/router'
 
-import { useFirebase, FirebaseContext } from 'context/FirebaseContext'
+import { useRoom, RoomContext } from 'context/RoomContext'
 
 import Navbar from 'components/Navbar'
 import UserAvatar from 'components/UserAvatar'
@@ -28,7 +29,6 @@ import {
   ProviderScreenProps,
 } from 'context/ScreenStream'
 import { SocketContext } from 'context/SocketContext'
-import GoogleLoginButton from 'components/auth/GoogleLoginButton'
 import { IncomingCall, User } from 'types'
 
 const Home: NextPage = () => {
@@ -41,9 +41,12 @@ const Home: NextPage = () => {
     setScreenRemoteMediaStream,
   } = React.useContext(MediaScreenStreamContext) as ProviderScreenProps
 
-  const { currentUser } = useFirebase() as FirebaseContext
+  const { user: currentUser } = useRoom() as RoomContext
 
   const socket = React.useContext(SocketContext) as Socket
+
+  // Create a ref to track the latest remote streams for the track event handler
+  const remoteStreamsRef = React.useRef<MediaStream[]>([])
 
   const [users, setUsers] = React.useState<User[] | undefined | null>()
   const [self, setSelf] = React.useState<SuperHero | undefined | null>()
@@ -75,6 +78,8 @@ const Home: NextPage = () => {
 
   const secret = React.useMemo(() => '$3#Ia', [])
 
+  const router = useRouter()
+
   const loadUsers = React.useCallback(async () => {
     const { data } = await serverInstance.get('/users')
     if (data.users) {
@@ -84,11 +89,11 @@ const Home: NextPage = () => {
 
   const joinRoom = React.useCallback(async () => {
     try {
-      if (currentUser && currentUser.displayName && currentUser.email) {
+      if (currentUser && currentUser.displayName && currentUser.guestId) {
         socket.emit('room:join', {
-          username: `${currentUser?.displayName} - ${currentUser?.email}`,
-          displayPicture: currentUser?.photoURL,
-          platform: 'macos',
+          username: `${currentUser?.displayName} (${currentUser?.guestId})`,
+          displayPicture: currentUser?.avatar || null,
+          platform: 'web',
         })
       }
     } catch (error) {
@@ -97,12 +102,78 @@ const Home: NextPage = () => {
   }, [currentUser])
 
   const handleClickUser = React.useCallback(async (user: User) => {
-    const offer = await peerService.getOffer()
-    if (offer) {
-      socket.emit('peer:call', { to: user.socketId, offer })
-      setCalledToUserId(user.socketId)
+    try {
+      // Reset peer connection state if it's not stable
+      if (peerService.peer) {
+        console.log('Current peer connection state:', peerService.peer.signalingState)
+        if (peerService.peer.signalingState !== 'stable') {
+          console.log('Peer connection not in stable state, reinitializing...')
+          // Reinitialize the peer service to get a fresh connection
+          peerService.reset()
+          
+          // Re-establish event listeners after reset
+          if (peerService.peer) {
+            console.log('Re-establishing event listeners after reset')
+            
+            // Re-establish remote track handler
+            const handleRemoteTrack = (ev: RTCTrackEvent) => {
+              console.log('Received remote track after reset:', ev.track.kind, 'from streams:', ev.streams.length)
+              
+              if (ev.streams && ev.streams.length > 0 && setRemoteMediaStream) {
+                const currentStreams = remoteStreamsRef.current
+                const newStreams = ev.streams.filter(stream => 
+                  !currentStreams.some(existing => existing.id === stream.id)
+                )
+                
+                if (newStreams.length > 0) {
+                  console.log('Adding new remote streams after reset:', newStreams.length)
+                  const updatedStreams = [...currentStreams, ...newStreams]
+                  setRemoteMediaStream(updatedStreams)
+                  remoteStreamsRef.current = updatedStreams
+                }
+              }
+            }
+            
+            peerService.peer.addEventListener('track', handleRemoteTrack)
+          }
+        }
+      }
+
+      // Start video stream before making the call to ensure tracks are available
+      console.log('Starting video stream before making call')
+      
+      // Start video stream directly here
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: true,
+      })
+
+      if (stream && setUserMediaStream) setUserMediaStream(stream)
+
+      console.log('Adding media tracks to peer connection:', stream.getTracks().length)
+      for (const track of stream.getTracks()) {
+        if (peerService.peer) {
+          console.log('Adding track:', track.kind, 'to peer connection')
+          peerService.peer?.addTrack(track, stream)
+        }
+      }
+      
+      // Small delay to ensure tracks are properly added
+      await new Promise(resolve => setTimeout(resolve, 100))
+      
+      console.log('Creating offer for user:', user.username)
+      const offer = await peerService.getOffer()
+      if (offer) {
+        socket.emit('peer:call', { to: user.socketId, offer })
+        setCalledToUserId(user.socketId)
+        console.log('Call initiated successfully')
+      } else {
+        console.log('Failed to create offer, peer connection not ready')
+      }
+    } catch (error) {
+      console.error('Error during call initiation:', error)
     }
-  }, [])
+  }, [setRemoteMediaStream, setUserMediaStream])
 
   const handleIncommingCall = React.useCallback(async (data: IncomingCall) => {
     if (data) {
@@ -110,45 +181,93 @@ const Home: NextPage = () => {
     }
   }, [])
 
+  const handleCallAccepted = React.useCallback(async (data) => {
+    const { offer, from, user } = data
+
+    try {
+      console.log('*** CALL ACCEPTED - CALLER SIDE ***')
+      console.log('Peer connection state before setting remote desc:', peerService.peer?.signalingState)
+      console.log('Peer connection ICE state:', peerService.peer?.iceConnectionState)
+      
+      await peerService.setRemoteDesc(offer)
+      
+      console.log('Remote description set successfully')
+      console.log('Peer connection state after setting remote desc:', peerService.peer?.signalingState)
+      console.log('Local tracks on peer connection:', peerService.peer?.getSenders()?.length || 0)
+      
+      peerService.peer?.getSenders()?.forEach((sender, index) => {
+        console.log(`Sender ${index}:`, sender.track?.kind, sender.track?.enabled, sender.track?.readyState)
+      })
+      
+      setRemoteUser({
+        displayPicture: user.displayPicture,
+        username: user.username,
+        isConnected: true,
+        joinedAt: new Date(),
+        platform: 'macos',
+        socketId: from,
+      })
+      setRemoteSocketId(from)
+      setCalledToUserId(undefined) // Clear the calling state
+    } catch (error) {
+      console.error('Failed to handle call acceptance:', error)
+    }
+  }, [])
+
   const handleAcceptIncommingCall = React.useCallback(async () => {
     if (!incommingCallData) return
     const { from, user, offer } = incommingCallData
     if (offer) {
-      const answer = await peerService.getAnswer(offer)
-      if (answer) {
-        socket.emit('peer:call:accepted', { to: from, offer: answer })
-        setRemoteUser({
-          displayPicture: user.displayPicture,
-          username: user.username,
-          isConnected: true,
-          joinedAt: new Date(),
-          platform: 'macos',
-          socketId: from,
+      try {
+        // Start video stream before accepting the call
+        console.log('Starting video stream before accepting call')
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: true,
         })
-        setRemoteSocketId(from)
+
+        if (stream && setUserMediaStream) setUserMediaStream(stream)
+
+        console.log('Adding media tracks to peer connection before accepting:', stream.getTracks().length)
+        for (const track of stream.getTracks()) {
+          if (peerService.peer) {
+            console.log('Adding track:', track.kind, 'to peer connection before accepting')
+            peerService.peer?.addTrack(track, stream)
+          }
+        }
+
+        console.log('*** ANSWERING CALL - CALLEE SIDE ***')
+        console.log('Peer connection state before getAnswer:', peerService.peer?.signalingState)
+        console.log('Local tracks added:', peerService.peer?.getSenders()?.length || 0)
+        
+        const answer = await peerService.getAnswer(offer)
+        if (answer) {
+          console.log('Answer created successfully')
+          console.log('Peer connection state after creating answer:', peerService.peer?.signalingState)
+          
+          socket.emit('peer:call:accepted', { to: from, offer: answer })
+          setRemoteUser({
+            displayPicture: user.displayPicture,
+            username: user.username,
+            isConnected: true,
+            joinedAt: new Date(),
+            platform: 'macos',
+            socketId: from,
+          })
+          setRemoteSocketId(from)
+        } else {
+          console.log('Failed to create answer, peer connection not ready')
+        }
+      } catch (error) {
+        console.error('Error accepting call:', error)
       }
     }
-  }, [incommingCallData])
+  }, [incommingCallData, setUserMediaStream])
 
   const handleRejectIncommingCall = React.useCallback(
     () => setIncommingCallData(undefined),
     []
   )
-
-  const handleCallAccepted = React.useCallback(async (data) => {
-    const { offer, from, user } = data
-
-    await peerService.setRemoteDesc(offer)
-    setRemoteUser({
-      displayPicture: user.displayPicture,
-      username: user.username,
-      isConnected: true,
-      joinedAt: new Date(),
-      platform: 'macos',
-      socketId: from,
-    })
-    setRemoteSocketId(from)
-  }, [])
 
   React.useEffect(() => {
     if (remoteSocketId) setIncommingCallData(undefined)
@@ -219,20 +338,39 @@ const Home: NextPage = () => {
 
   const handleNegosiation = React.useCallback(
     async (ev: Event) => {
+      if (!remoteSocketId) {
+        console.log('No remote socket ID, skipping negotiation')
+        return
+      }
+      
+      if (calledToUserId || incommingCallData) {
+        console.log('In initial call setup phase, skipping negotiation')
+        return
+      }
+      
+      console.log('Handling negotiation needed event')
       const offer = await peerService.getOffer()
-      socket.emit('peer:negotiate', {
-        to: peerService.remoteSocketId,
-        offer,
-      })
+      if (offer) {
+        socket.emit('peer:negotiate', {
+          to: peerService.remoteSocketId,
+          offer,
+        })
+      } else {
+        console.log('Failed to create negotiation offer')
+      }
     },
-    [remoteSocketId]
+    [remoteSocketId, calledToUserId, incommingCallData]
   )
 
   const handleRequiredPeerNegotiate = React.useCallback(async (data) => {
     const { from, offer } = data
     if (offer) {
       const answer = await peerService.getAnswer(offer)
-      socket.emit('peer:negosiate:result', { to: from, offer: answer })
+      if (answer) {
+        socket.emit('peer:negosiate:result', { to: from, offer: answer })
+      } else {
+        console.log('Failed to create negotiation answer')
+      }
     }
   }, [])
 
@@ -240,7 +378,11 @@ const Home: NextPage = () => {
     async (data) => {
       const { from, offer } = data
       if (offer) {
-        await peerService.setRemoteDesc(offer)
+        try {
+          await peerService.setRemoteDesc(offer)
+        } catch (error) {
+          console.error('Failed to set remote description during negotiation:', error)
+        }
       }
     },
     []
@@ -254,8 +396,10 @@ const Home: NextPage = () => {
 
     if (stream && setUserMediaStream) setUserMediaStream(stream)
 
+    console.log('Adding media tracks to peer connection:', stream.getTracks().length)
     for (const track of stream.getTracks()) {
       if (peerService.peer) {
+        console.log('Adding track:', track.kind, 'to peer connection')
         peerService.peer?.addTrack(track, stream)
       }
     }
@@ -287,11 +431,89 @@ const Home: NextPage = () => {
     joinRoom()
   }, [currentUser])
 
+  // Keep the ref in sync with the latest remote streams
+  React.useEffect(() => {
+    remoteStreamsRef.current = remoteStreams || []
+    console.log('Remote streams updated:', remoteStreams?.length || 0, remoteStreams?.map(s => s.id))
+  }, [remoteStreams])
+
+  // Automatically start video stream when connection is established
+  React.useEffect(() => {
+    if (remoteSocketId) {
+      console.log('Connection established, starting video stream after delay')
+      // Add a small delay to ensure the WebRTC connection is fully established
+      const timer = setTimeout(async () => {
+        try {
+          await handleStartAudioVideoStream()
+          console.log('Video stream started successfully')
+        } catch (error) {
+          console.error('Error starting video stream:', error)
+        }
+      }, 1000) // 1 second delay
+      
+      return () => clearTimeout(timer)
+    }
+  }, [remoteSocketId, handleStartAudioVideoStream])
+
   React.useEffect(() => {
     loadUsers()
     const peerServiceInit = peerService.init()
 
     peerService?.peer?.addEventListener('negotiationneeded', handleNegosiation)
+
+    // Create a callback to handle remote tracks
+    const handleRemoteTrack = (ev: RTCTrackEvent) => {
+      console.log('*** REMOTE TRACK EVENT ***')
+      console.log('Track kind:', ev.track.kind)
+      console.log('Track ID:', ev.track.id)
+      console.log('Track enabled:', ev.track.enabled)
+      console.log('Track readyState:', ev.track.readyState)
+      console.log('Number of streams:', ev.streams.length)
+      ev.streams.forEach((stream, index) => {
+        console.log(`Stream ${index} ID:`, stream.id)
+        console.log(`Stream ${index} tracks:`, stream.getTracks().length)
+        stream.getTracks().forEach((track, trackIndex) => {
+          console.log(`  Track ${trackIndex}:`, track.kind, track.enabled, track.readyState)
+        })
+      })
+      
+      if (ev.streams && ev.streams.length > 0 && setRemoteMediaStream) {
+        // Get the current streams from ref to avoid stale closure
+        const currentStreams = remoteStreamsRef.current
+        console.log('Current remote streams count:', currentStreams.length)
+        
+        // Add new streams that aren't already in the list
+        const newStreams = ev.streams.filter(stream => 
+          !currentStreams.some(existing => existing.id === stream.id)
+        )
+        
+        if (newStreams.length > 0) {
+          console.log('*** ADDING NEW REMOTE STREAMS ***')
+          console.log('New streams count:', newStreams.length)
+          const updatedStreams = [...currentStreams, ...newStreams]
+          console.log('Total remote streams after update:', updatedStreams.length)
+          
+          setRemoteMediaStream(updatedStreams)
+          remoteStreamsRef.current = updatedStreams // Keep ref in sync
+          
+          // Additional verification
+          setTimeout(() => {
+            console.log('*** VERIFICATION AFTER 1 SECOND ***')
+            console.log('Remote streams in context:', remoteStreams?.length || 0)
+            remoteStreams?.forEach((stream, i) => {
+              console.log(`Context stream ${i}:`, stream.id, 'active:', stream.active)
+            })
+          }, 1000)
+        } else {
+          console.log('No new streams to add (duplicates filtered out)')
+        }
+      } else {
+        console.log('*** WARNING: No streams or setRemoteMediaStream not available ***')
+        console.log('ev.streams:', !!ev.streams)
+        console.log('ev.streams.length:', ev.streams?.length || 0)
+        console.log('setRemoteMediaStream:', !!setRemoteMediaStream)
+      }
+    }
 
     let temp = {
       filename: '',
@@ -303,12 +525,7 @@ const Home: NextPage = () => {
     let receiveBuffer: Buffer[] = []
 
     if (peerService.peer) {
-      peerService.peer.addEventListener('track', async (ev) => {
-        const remoteStream = ev.streams
-        if (remoteStream && setRemoteMediaStream) {
-          setRemoteMediaStream([...remoteStreams, remoteStream[0]])
-        }
-      })
+      peerService.peer.addEventListener('track', handleRemoteTrack)
       peerService.peer.addEventListener('ended', async (ev) => {})
     }
 
@@ -416,8 +633,9 @@ const Home: NextPage = () => {
         'negotiationneeded',
         handleNegosiation
       )
+      peerService?.peer?.removeEventListener('track', handleRemoteTrack)
     }
-  }, [remoteStreams])
+  }, [handleNegosiation])
 
   const handleUserDisconnection = React.useCallback(
     (payload) => {
@@ -461,21 +679,30 @@ const Home: NextPage = () => {
     return () => {
       socket.off('refresh:user-list', loadUsers)
       socket.off('peer:incomming-call', handleIncommingCall)
-      socket.off('peer:call-accepted', handleCallAccepted)
+      socket.off('peer:call:accepted', handleCallAccepted)
       socket.off('peer:negotiate', handleRequiredPeerNegotiate)
       socket.off(
         'peer:negosiate:result',
         handleRequiredPeerNegotiateFinalResult
       )
     }
-  }, [])
+  }, [handleStartAudioVideoStream])
 
   if (!currentUser) {
     return (
       <div className="min-h-screen justify-center bg-[#18181b] p-5">
         <Navbar />
         <div className="flex min-h-[80vh] w-full items-center justify-center text-white">
-          <GoogleLoginButton />
+          <div className="text-center">
+            <h2 className="text-2xl font-bold mb-4">Please Join a Room First</h2>
+            <p className="text-gray-300 mb-6">You need to join a room to access P2P features.</p>
+            <button
+              onClick={() => router.push('/')}
+              className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
+            >
+              Go to Home Page
+            </button>
+          </div>
         </div>
       </div>
     )
@@ -483,7 +710,7 @@ const Home: NextPage = () => {
 
   return (
     <div className="min-h-screen justify-center bg-[#18181b] p-5">
-      <Navbar remoteSocketId={remoteSocketId} remoteUser={remoteUser} />
+      <Navbar remoteSocketId={remoteSocketId} remoteUser={remoteUser?.username} />
       {remoteSocketId && (
         <Dashboard
           availableFiles={avilableFiles}
@@ -502,7 +729,7 @@ const Home: NextPage = () => {
               .filter(
                 (e) =>
                   e.username !==
-                  `${currentUser?.displayName} - ${currentUser?.email}`
+                  `${currentUser?.displayName} (${currentUser?.guestId})`
               )
               .map((user, index) => (
                 <div
@@ -524,7 +751,7 @@ const Home: NextPage = () => {
             users.filter(
               (e) =>
                 e.username !==
-                `${currentUser?.displayName} - ${currentUser?.email}`
+                `${currentUser?.displayName} (${currentUser?.guestId})`
             ).length <= 0) && (
             <Typography className="font-sans text-slate-400 opacity-70 motion-safe:animate-bounce">
               Join by opening this on other tab

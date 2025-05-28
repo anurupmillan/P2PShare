@@ -1,83 +1,80 @@
 import React from 'react'
-import Typography from '@mui/material/Typography'
-import Button from '@mui/material/Button'
 import { SiAirplayaudio } from 'react-icons/si'
 import {
-  useFirebase,
-  FirebaseContext,
-  handleLogout,
-} from 'context/FirebaseContext'
-import UserAvatar from './UserAvatar'
-import { BsArrowLeftRight } from 'react-icons/bs'
-import { User } from 'types'
+  useRoom,
+  RoomContext,
+} from 'context/RoomContext'
 
-export interface NavbarProps {
-  remoteUser?: User | undefined | null
-  remoteSocketId?: string | undefined | null
+interface NavbarProps {
+  remoteUser?: string
+  remoteSocketId?: string
 }
 
 const Navbar: React.FC<NavbarProps> = (props) => {
   const { remoteUser, remoteSocketId } = props
-  const { currentUser } = useFirebase() as FirebaseContext
+  const { user: currentUser, leaveCurrentRoom } = useRoom() as RoomContext
+
+  const handleLogout = async () => {
+    try {
+      await leaveCurrentRoom()
+    } catch (error) {
+      console.error('Error leaving room:', error)
+    }
+  }
 
   return (
-    <nav className="flex items-center justify-between">
-      <Typography
-        variant="h5"
-        className="flex items-center align-middle font-sans font-bold text-white antialiased"
-      >
-        <SiAirplayaudio className="mr-2 inline" />
-        ConnectMe<span className="text-sky-400/100">P2P</span>
-      </Typography>
-      {currentUser && remoteSocketId && (
-        <div>
-          <div className="mx-5 mt-4 flex items-center text-white">
-            <UserAvatar
-              username={
-                currentUser?.displayName || currentUser.email || 'Someone'
-              }
-              src={currentUser?.photoURL || ''}
-              height={40}
-              width={40}
-            />
-            <BsArrowLeftRight fontSize={20} />
-            {remoteUser ? (
-              <UserAvatar
-                username={remoteUser?.username || 'Someone'}
-                src={remoteUser?.displayPicture}
-                height={40}
-                width={40}
-              />
-            ) : (
-              <Typography sx={{ mx: 2 }}>Disconnected</Typography>
+    <nav className="bg-white shadow-lg">
+      <div className="max-w-7xl mx-auto px-4">
+        <div className="flex justify-between h-16">
+          <div className="flex items-center">
+            <div className="flex-shrink-0 flex items-center">
+              <SiAirplayaudio className="h-8 w-8 text-blue-600" />
+              <span className="ml-2 text-xl font-bold text-gray-900">P2PShare</span>
+            </div>
+          </div>
+          
+          <div className="flex items-center space-x-4">
+            {currentUser && (
+              <>
+                <div className="flex items-center space-x-3">
+                  <div className="flex items-center space-x-2">
+                    {currentUser.avatar ? (
+                      <img
+                        className="h-8 w-8 rounded-full"
+                        src={currentUser.avatar}
+                        alt={currentUser.displayName}
+                      />
+                    ) : (
+                      <div className="h-8 w-8 rounded-full bg-blue-500 flex items-center justify-center">
+                        <span className="text-white text-sm font-medium">
+                          {currentUser.displayName.charAt(0).toUpperCase()}
+                        </span>
+                      </div>
+                    )}
+                    <span className="text-sm font-medium text-gray-700">
+                      {currentUser.displayName}
+                    </span>
+                  </div>
+                  
+                  {remoteUser && (
+                    <div className="flex items-center space-x-2 text-sm text-gray-500">
+                      <span>Connected to:</span>
+                      <span className="font-medium">{remoteUser}</span>
+                    </div>
+                  )}
+                </div>
+                
+                <button
+                  onClick={handleLogout}
+                  className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors"
+                >
+                  Leave Room
+                </button>
+              </>
             )}
           </div>
         </div>
-      )}
-      {currentUser && (
-        <>
-          <div className="mx-6 mt-4 flex">
-            <UserAvatar
-              username={
-                currentUser?.displayName || currentUser.email || 'Someone'
-              }
-              src={currentUser?.photoURL || ''}
-              height={40}
-              width={40}
-            />
-
-            <Button
-              variant="outlined"
-              color="error"
-              size="small"
-              onClick={() => handleLogout()}
-              className="ml-3"
-            >
-              LogOut
-            </Button>
-          </div>
-        </>
-      )}
+      </div>
     </nav>
   )
 }

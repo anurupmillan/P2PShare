@@ -34,6 +34,17 @@ const AudioVideoBar: React.FC<AudioVideoBarProps> = (props) => {
     MediaScreenStreamContext
   ) as ProviderScreenProps
 
+  // Add debugging for remote streams
+  React.useEffect(() => {
+    console.log('AudioVideoBar - Remote streams:', remoteStreams?.length || 0)
+    remoteStreams?.forEach((stream, index) => {
+      console.log(`Stream ${index}:`, stream.id, 'tracks:', stream.getTracks().length)
+      stream.getTracks().forEach((track, trackIndex) => {
+        console.log(`  Track ${trackIndex}:`, track.kind, track.enabled, track.readyState)
+      })
+    })
+  }, [remoteStreams])
+
   return (
     <div className="h-full w-full rounded-md bg-transparent">
       <div className="video-player-container w-full rounded-md">
